@@ -6,6 +6,13 @@ publish = false
 edition = "2024"
 license = "Apache-2.0"
 
+[[bin]]
+name = "forager-cargo"
+path = "src/main.rs"
+
+[package.metadata.dist]
+dist = true
+
 [dependencies]
 anyhow = "1"
 serde = { version = "1", features = ["derive"] }
