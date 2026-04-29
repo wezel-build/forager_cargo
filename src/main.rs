@@ -5,9 +5,15 @@ use serde::Deserialize;
 use wezel_types::ForagerPluginOutput;
 
 #[derive(Deserialize)]
-#[serde(untagged, rename_all = "snake_case")]
+#[serde(untagged)]
 enum PackageSpecifier {
     Packages(Vec<String>),
+    Workspace(WorkspaceTag),
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum WorkspaceTag {
     Workspace,
 }
 
@@ -73,7 +79,7 @@ fn main() -> Result<()> {
                 .into_iter()
                 .fold(&mut child, |child, package| child.arg("-p").arg(package));
         }
-        PackageSpecifier::Workspace => {
+        PackageSpecifier::Workspace(WorkspaceTag::Workspace) => {
             child.arg("--workspace");
         }
     }
@@ -98,4 +104,69 @@ fn main() -> Result<()> {
 
     let status = child.status().context("failed to spawn command")?;
     process::exit(status.code().unwrap_or(1));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn parse(s: &str) -> CargoInputs {
+        serde_json::from_str(s).expect("should parse")
+    }
+
+    #[test]
+    fn workspace_target_from_string() {
+        let inputs = parse(r#"{"command":"build","build_target":"workspace"}"#);
+        assert!(matches!(inputs.command, Command::Build));
+        assert!(matches!(
+            inputs.build_target,
+            PackageSpecifier::Workspace(WorkspaceTag::Workspace)
+        ));
+    }
+
+    #[test]
+    fn packages_target_from_array() {
+        let inputs = parse(r#"{"command":"test","build_target":["forager_cargo","wezel_types"]}"#);
+        assert!(matches!(inputs.command, Command::Test));
+        match inputs.build_target {
+            PackageSpecifier::Packages(items) => {
+                assert_eq!(items, vec!["forager_cargo", "wezel_types"]);
+            }
+            _ => panic!("expected Packages variant"),
+        }
+    }
+
+    #[test]
+    fn command_is_lowercase() {
+        // Capitalized variant names must be rejected.
+        assert!(
+            serde_json::from_str::<CargoInputs>(
+                r#"{"command":"Build","build_target":"workspace"}"#
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn workspace_tag_is_lowercase() {
+        assert!(
+            serde_json::from_str::<CargoInputs>(
+                r#"{"command":"build","build_target":"WORKSPACE"}"#
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn null_build_target_rejected() {
+        assert!(
+            serde_json::from_str::<CargoInputs>(r#"{"command":"build","build_target":null}"#)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn missing_build_target_rejected() {
+        assert!(serde_json::from_str::<CargoInputs>(r#"{"command":"build"}"#).is_err());
+    }
 }
