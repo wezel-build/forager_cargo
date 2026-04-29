@@ -85,9 +85,9 @@ fn main() -> Result<()> {
     }
 
     let timer_start = std::time::Instant::now();
-    child.spawn()?;
+    let status = child.status().context("failed to spawn command")?;
     let end = timer_start.elapsed();
-    // Write the empty measurements output before running (exec produces no measurements).
+
     let value: u64 = end
         .as_millis()
         .try_into()
@@ -102,7 +102,6 @@ fn main() -> Result<()> {
     std::fs::write(&out_path, serde_json::to_string(&envelope)?)
         .with_context(|| format!("writing {out_path}"))?;
 
-    let status = child.status().context("failed to spawn command")?;
     process::exit(status.code().unwrap_or(1));
 }
 
