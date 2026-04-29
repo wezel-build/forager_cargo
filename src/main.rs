@@ -5,13 +5,14 @@ use serde::Deserialize;
 use wezel_types::ForagerPluginOutput;
 
 #[derive(Deserialize)]
-#[serde(untagged)]
+#[serde(untagged, rename_all = "snake_case")]
 enum PackageSpecifier {
     Packages(Vec<String>),
     Workspace,
 }
 
 #[derive(Default, Deserialize)]
+#[serde(rename_all = "snake_case")]
 enum Command {
     #[default]
     Build,
@@ -32,8 +33,7 @@ impl Command {
 #[derive(Deserialize)]
 struct CargoInputs {
     command: Command,
-    #[serde(flatten)]
-    target: PackageSpecifier,
+    build_target: PackageSpecifier,
 }
 
 fn main() -> Result<()> {
@@ -67,7 +67,7 @@ fn main() -> Result<()> {
 
     child.arg(inputs.command.as_str());
 
-    match inputs.target {
+    match inputs.build_target {
         PackageSpecifier::Packages(items) => {
             items
                 .into_iter()
