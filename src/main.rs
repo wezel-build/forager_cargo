@@ -1,23 +1,25 @@
 use std::process;
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, anyhow};
+use forager_sdk::Forager;
+use schemars::JsonSchema;
 use serde::Deserialize;
 use wezel_types::ForagerPluginOutput;
 
-#[derive(Deserialize)]
+#[derive(Deserialize, JsonSchema)]
 #[serde(untagged)]
 enum PackageSpecifier {
     Packages(Vec<String>),
     Workspace(WorkspaceTag),
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 enum WorkspaceTag {
     Workspace,
 }
 
-#[derive(Default, Deserialize)]
+#[derive(Default, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 enum Command {
     #[default]
@@ -36,74 +38,58 @@ impl Command {
     }
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, JsonSchema)]
 struct CargoInputs {
+    /// Cargo subcommand to invoke (`build`, `bench`, or `test`).
     command: Command,
+    /// Build target — either a list of package names or the literal string "workspace".
     build_target: PackageSpecifier,
 }
 
-fn main() -> Result<()> {
-    let args: Vec<String> = std::env::args().collect();
-    if args.get(1).is_some_and(|a| a == "--schema") {
-        println!(
-            "{}",
-            serde_json::json!({
-                "name": "exec",
-                "description": "Executes a shell command; produces no measurements",
-                "inputs": {
-                    "cmd": { "type": "string", "description": "Shell command to run" },
-                    "env": { "type": "object", "description": "Extra environment variables" },
-                    "cwd": { "type": "string", "description": "Working directory override" }
-                },
-                "output": null
-            })
-        );
-        return Ok(());
-    }
+struct Cargo;
 
-    let inputs_path = std::env::var("FORAGER_INPUTS").context("FORAGER_INPUTS not set")?;
-    let out_path = std::env::var("FORAGER_OUT").context("FORAGER_OUT not set")?;
+impl Forager for Cargo {
+    const NAME: &'static str = "cargo";
+    const DESCRIPTION: &'static str = "Runs `cargo <command>` and records wall-clock time";
+    const MEASUREMENTS_DOC: &'static str =
+        "**`time_ms`** — how long `cargo <command>` took, in milliseconds.";
+    type Inputs = CargoInputs;
 
-    let inputs: CargoInputs = serde_json::from_str(
-        &std::fs::read_to_string(&inputs_path).with_context(|| format!("reading {inputs_path}"))?,
-    )
-    .context("parsing FORAGER_INPUTS")?;
-
-    let mut child = process::Command::new("cargo");
-
-    child.arg(inputs.command.as_str());
-
-    match inputs.build_target {
-        PackageSpecifier::Packages(items) => {
-            items
-                .into_iter()
-                .fold(&mut child, |child, package| child.arg("-p").arg(package));
+    fn run(inputs: CargoInputs) -> Result<Vec<ForagerPluginOutput>> {
+        let mut child = process::Command::new("cargo");
+        child.arg(inputs.command.as_str());
+        match inputs.build_target {
+            PackageSpecifier::Packages(items) => {
+                items
+                    .into_iter()
+                    .fold(&mut child, |child, package| child.arg("-p").arg(package));
+            }
+            PackageSpecifier::Workspace(WorkspaceTag::Workspace) => {
+                child.arg("--workspace");
+            }
         }
-        PackageSpecifier::Workspace(WorkspaceTag::Workspace) => {
-            child.arg("--workspace");
+
+        let timer_start = std::time::Instant::now();
+        let status = child.status().context("failed to spawn cargo")?;
+        let elapsed = timer_start.elapsed();
+
+        if !status.success() {
+            return Err(anyhow!("cargo exited with {status}"));
         }
-    }
 
-    let timer_start = std::time::Instant::now();
-    let status = child.status().context("failed to spawn command")?;
-    let end = timer_start.elapsed();
-
-    let value: u64 = end
-        .as_millis()
-        .try_into()
-        .context("Could not stuff build duration into u64")?;
-    let envelope = wezel_types::ForagerPluginEnvelope {
-        measurements: vec![ForagerPluginOutput {
+        let ms: u64 = elapsed
+            .as_millis()
+            .try_into()
+            .context("build duration overflowed u64")?;
+        Ok(vec![ForagerPluginOutput {
             name: "time_ms".to_owned(),
-            value: value.into(),
+            value: ms.into(),
             tags: Default::default(),
-        }],
-    };
-    std::fs::write(&out_path, serde_json::to_string(&envelope)?)
-        .with_context(|| format!("writing {out_path}"))?;
-
-    process::exit(status.code().unwrap_or(1));
+        }])
+    }
 }
+
+forager_sdk::forager_main!(Cargo);
 
 #[cfg(test)]
 mod tests {
@@ -137,7 +123,6 @@ mod tests {
 
     #[test]
     fn command_is_lowercase() {
-        // Capitalized variant names must be rejected.
         assert!(
             serde_json::from_str::<CargoInputs>(
                 r#"{"command":"Build","build_target":"workspace"}"#
