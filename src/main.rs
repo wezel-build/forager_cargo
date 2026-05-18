@@ -51,7 +51,7 @@ struct Cargo;
 impl Forager for Cargo {
     const NAME: &'static str = "cargo";
     const DESCRIPTION: &'static str = "Runs `cargo <command>` and records wall-clock time";
-    const MEASUREMENTS_DOC: &'static str =
+    const OUTCOMES_DOC: &'static str =
         "**`time_ms`** — how long `cargo <command>` took, in milliseconds.";
     type Inputs = CargoInputs;
 
