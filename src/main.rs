@@ -168,9 +168,7 @@ mod tests {
 
     #[test]
     fn profile_passed_through() {
-        let inputs = parse(
-            r#"{"command":"build","build_target":"workspace","profile":"release"}"#,
-        );
+        let inputs = parse(r#"{"command":"build","build_target":"workspace","profile":"release"}"#);
         assert_eq!(inputs.profile.as_deref(), Some("release"));
     }
 }
