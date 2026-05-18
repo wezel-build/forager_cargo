@@ -44,6 +44,9 @@ struct CargoInputs {
     command: Command,
     /// Build target — either a list of package names or the literal string "workspace".
     build_target: PackageSpecifier,
+    /// Cargo profile to use, propagated as `--profile <value>`. Omit to use the default profile.
+    #[serde(default)]
+    profile: Option<String>,
 }
 
 struct Cargo;
@@ -58,6 +61,9 @@ impl Forager for Cargo {
     fn run(inputs: CargoInputs) -> Result<Vec<ForagerPluginOutput>> {
         let mut child = process::Command::new("cargo");
         child.arg(inputs.command.as_str());
+        if let Some(profile) = inputs.profile.as_deref() {
+            child.arg("--profile").arg(profile);
+        }
         match inputs.build_target {
             PackageSpecifier::Packages(items) => {
                 items
@@ -152,5 +158,17 @@ mod tests {
     #[test]
     fn missing_build_target_rejected() {
         assert!(serde_json::from_str::<CargoInputs>(r#"{"command":"build"}"#).is_err());
+    }
+
+    #[test]
+    fn profile_defaults_to_none() {
+        let inputs = parse(r#"{"command":"build","build_target":"workspace"}"#);
+        assert!(inputs.profile.is_none());
+    }
+
+    #[test]
+    fn profile_passed_through() {
+        let inputs = parse(r#"{"command":"build","build_target":"workspace","profile":"release"}"#);
+        assert_eq!(inputs.profile.as_deref(), Some("release"));
     }
 }
