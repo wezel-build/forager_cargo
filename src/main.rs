@@ -138,8 +138,7 @@ impl Forager for Cargo {
     const NAME: &'static str = "cargo";
     const DESCRIPTION: &'static str =
         "Runs `cargo <command>` and records the build time cargo reports";
-    const OUTCOMES_DOC: &'static str =
-        "**`time_ms`** — cargo's own reported build duration (the `Finished … in <t>` \
+    const OUTCOMES_DOC: &'static str = "**`time_ms`** — cargo's own reported build duration (the `Finished … in <t>` \
          line), in milliseconds. Excludes process startup and dependency resolution.";
     type Inputs = CargoInputs;
 
