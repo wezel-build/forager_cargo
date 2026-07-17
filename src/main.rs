@@ -1,3 +1,4 @@
+use std::io::{BufRead, BufReader, Write};
 use std::process;
 
 use anyhow::{Context, Result, anyhow};
@@ -109,13 +110,37 @@ fn render_command(cmd: &process::Command) -> String {
         .join(" ")
 }
 
+/// Parses the duration out of cargo's `Finished` status line, returning
+/// milliseconds. Cargo formats the duration (see its `util::elapsed`) as either
+/// `"<secs>.<centis>s"` for sub-minute builds (e.g. `0.26s`) or
+/// `"<mins>m <secs>s"` for longer ones (e.g. `1m 05s`, no sub-second part).
+/// Returns `None` for any line that isn't such a status line.
+fn parse_finished_ms(line: &str) -> Option<u64> {
+    if !line.trim_start().starts_with("Finished") {
+        return None;
+    }
+    // The rest of the line (profile, target kinds) never contains " in ", so
+    // splitting from the right isolates the duration.
+    let dur = line.rsplit_once(" in ")?.1.trim();
+    if let Some((mins, secs)) = dur.split_once("m ") {
+        let mins: u64 = mins.trim().parse().ok()?;
+        let secs: u64 = secs.trim().strip_suffix('s')?.trim().parse().ok()?;
+        Some(mins * 60_000 + secs * 1_000)
+    } else {
+        let secs: f64 = dur.strip_suffix('s')?.parse().ok()?;
+        Some((secs * 1_000.0).round() as u64)
+    }
+}
+
 struct Cargo;
 
 impl Forager for Cargo {
     const NAME: &'static str = "cargo";
-    const DESCRIPTION: &'static str = "Runs `cargo <command>` and records wall-clock time";
+    const DESCRIPTION: &'static str =
+        "Runs `cargo <command>` and records the build time cargo reports";
     const OUTCOMES_DOC: &'static str =
-        "**`time_ms`** — how long `cargo <command>` took, in milliseconds.";
+        "**`time_ms`** — cargo's own reported build duration (the `Finished … in <t>` \
+         line), in milliseconds. Excludes process startup and dependency resolution.";
     type Inputs = CargoInputs;
 
     fn run(inputs: CargoInputs) -> Result<Vec<ForagerPluginOutput>> {
@@ -154,18 +179,43 @@ impl Forager for Cargo {
             bins.append(&mut child, "--bins", "--bin");
         }
 
-        let timer_start = std::time::Instant::now();
-        let status = child.status().context("failed to spawn cargo")?;
-        let elapsed = timer_start.elapsed();
+        // Capture cargo's stderr so we can read the duration out of its
+        // `Finished ... in <t>` status line, which cargo measures itself and
+        // which therefore excludes our process-spawn and cargo's own startup
+        // overhead. We still forward every line back to stderr so the build
+        // output the user sees is unchanged. stdout stays inherited (e.g. so
+        // `cargo test` runner output is untouched).
+        child.stderr(process::Stdio::piped());
 
+        let timer_start = std::time::Instant::now();
+        let mut proc = child.spawn().context("failed to spawn cargo")?;
+        let stderr = proc.stderr.take().expect("stderr was piped");
+
+        let mut reported_ms: Option<u64> = None;
+        let sink = std::io::stderr();
+        for line in BufReader::new(stderr).lines() {
+            let line = line.context("failed to read cargo stderr")?;
+            if reported_ms.is_none() {
+                reported_ms = parse_finished_ms(&line);
+            }
+            let _ = writeln!(sink.lock(), "{line}");
+        }
+
+        let status = proc.wait().context("failed to wait for cargo")?;
         if !status.success() {
             return Err(anyhow!("`{}` exited with {status}", render_command(&child)));
         }
 
-        let ms: u64 = elapsed
-            .as_millis()
-            .try_into()
-            .context("build duration overflowed u64")?;
+        // Fall back to wall-clock only if cargo printed no parseable `Finished`
+        // line (it always does on success, but keep the metric non-null).
+        let ms: u64 = match reported_ms {
+            Some(ms) => ms,
+            None => timer_start
+                .elapsed()
+                .as_millis()
+                .try_into()
+                .context("build duration overflowed u64")?,
+        };
         Ok(vec![ForagerPluginOutput {
             name: "time_ms".to_owned(),
             value: ms.into(),
@@ -306,6 +356,31 @@ mod tests {
         );
         assert!(inputs.all_targets);
         assert!(inputs.lib);
+    }
+
+    #[test]
+    fn parse_finished_sub_minute() {
+        let line = "    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.26s";
+        assert_eq!(parse_finished_ms(line), Some(260));
+    }
+
+    #[test]
+    fn parse_finished_whole_seconds() {
+        let line = "    Finished `release` profile [optimized] target(s) in 12.00s";
+        assert_eq!(parse_finished_ms(line), Some(12_000));
+    }
+
+    #[test]
+    fn parse_finished_minutes() {
+        let line = "    Finished `release` profile [optimized] target(s) in 1m 05s";
+        assert_eq!(parse_finished_ms(line), Some(65_000));
+    }
+
+    #[test]
+    fn parse_finished_ignores_other_lines() {
+        assert_eq!(parse_finished_ms("   Compiling forager_cargo v0.1.0"), None);
+        assert_eq!(parse_finished_ms("warning: unused variable: `x`"), None);
+        assert_eq!(parse_finished_ms(""), None);
     }
 
     #[test]
