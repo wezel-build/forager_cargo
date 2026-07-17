@@ -262,8 +262,7 @@ mod tests {
 
     #[test]
     fn target_all_from_string() {
-        let inputs =
-            parse(r#"{"command":"build","build_target":"workspace","examples":"all"}"#);
+        let inputs = parse(r#"{"command":"build","build_target":"workspace","examples":"all"}"#);
         assert!(matches!(
             inputs.examples,
             Some(TargetSpecifier::All(AllTag::All))
@@ -312,7 +311,13 @@ mod tests {
     #[test]
     fn render_command_joins_program_and_args() {
         let mut cmd = process::Command::new("cargo");
-        cmd.arg("build").arg("--workspace").arg("--example").arg("foo");
-        assert_eq!(render_command(&cmd), "cargo build --workspace --example foo");
+        cmd.arg("build")
+            .arg("--workspace")
+            .arg("--example")
+            .arg("foo");
+        assert_eq!(
+            render_command(&cmd),
+            "cargo build --workspace --example foo"
+        );
     }
 }
