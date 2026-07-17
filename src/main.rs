@@ -18,6 +18,39 @@ enum WorkspaceTag {
     Workspace,
 }
 
+/// Selects which targets of a given kind to build — either the literal string
+/// "all" or a list of target names.
+#[derive(Deserialize, JsonSchema)]
+#[serde(untagged)]
+enum TargetSpecifier {
+    Names(Vec<String>),
+    All(AllTag),
+}
+
+#[derive(Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+enum AllTag {
+    All,
+}
+
+impl TargetSpecifier {
+    /// Appends the appropriate cargo flags to `child`. `all_flag` is the plural
+    /// flag that selects every target of the kind (e.g. `--examples`), and
+    /// `one_flag` is the singular flag that selects one by name (e.g. `--example`).
+    fn append(&self, child: &mut process::Command, all_flag: &str, one_flag: &str) {
+        match self {
+            TargetSpecifier::All(AllTag::All) => {
+                child.arg(all_flag);
+            }
+            TargetSpecifier::Names(names) => {
+                for name in names {
+                    child.arg(one_flag).arg(name);
+                }
+            }
+        }
+    }
+}
+
 #[derive(Default, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 enum Command {
@@ -46,6 +79,34 @@ struct CargoInputs {
     /// Cargo profile to use, propagated as `--profile <value>`. Omit to use the default profile.
     #[serde(default)]
     profile: Option<String>,
+    /// Build every target (lib, bins, tests, benches, examples) via `--all-targets`.
+    #[serde(default)]
+    all_targets: bool,
+    /// Build the library target via `--lib`.
+    #[serde(default)]
+    lib: bool,
+    /// Examples to build, as `--examples` (all) or `--example <name>` per name. Omit to build none.
+    #[serde(default)]
+    examples: Option<TargetSpecifier>,
+    /// Benchmarks to build, as `--benches` (all) or `--bench <name>` per name. Omit to build none.
+    #[serde(default)]
+    benches: Option<TargetSpecifier>,
+    /// Test targets to build, as `--tests` (all) or `--test <name>` per name. Omit to build none.
+    #[serde(default)]
+    tests: Option<TargetSpecifier>,
+    /// Binaries to build, as `--bins` (all) or `--bin <name>` per name. Omit to build none.
+    #[serde(default)]
+    bins: Option<TargetSpecifier>,
+}
+
+/// Renders a spawned command back into a readable invocation string for error
+/// messages, e.g. `cargo build --workspace --example foo`.
+fn render_command(cmd: &process::Command) -> String {
+    std::iter::once(cmd.get_program())
+        .chain(cmd.get_args())
+        .map(|part| part.to_string_lossy())
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 struct Cargo;
@@ -74,12 +135,31 @@ impl Forager for Cargo {
             }
         }
 
+        if inputs.all_targets {
+            child.arg("--all-targets");
+        }
+        if inputs.lib {
+            child.arg("--lib");
+        }
+        if let Some(examples) = &inputs.examples {
+            examples.append(&mut child, "--examples", "--example");
+        }
+        if let Some(benches) = &inputs.benches {
+            benches.append(&mut child, "--benches", "--bench");
+        }
+        if let Some(tests) = &inputs.tests {
+            tests.append(&mut child, "--tests", "--test");
+        }
+        if let Some(bins) = &inputs.bins {
+            bins.append(&mut child, "--bins", "--bin");
+        }
+
         let timer_start = std::time::Instant::now();
         let status = child.status().context("failed to spawn cargo")?;
         let elapsed = timer_start.elapsed();
 
         if !status.success() {
-            return Err(anyhow!("cargo exited with {status}"));
+            return Err(anyhow!("`{}` exited with {status}", render_command(&child)));
         }
 
         let ms: u64 = elapsed
@@ -169,5 +249,75 @@ mod tests {
     fn profile_passed_through() {
         let inputs = parse(r#"{"command":"build","build_target":"workspace","profile":"release"}"#);
         assert_eq!(inputs.profile.as_deref(), Some("release"));
+    }
+
+    #[test]
+    fn target_selectors_default_to_none() {
+        let inputs = parse(r#"{"command":"build","build_target":"workspace"}"#);
+        assert!(inputs.examples.is_none());
+        assert!(inputs.benches.is_none());
+        assert!(inputs.tests.is_none());
+        assert!(inputs.bins.is_none());
+    }
+
+    #[test]
+    fn target_all_from_string() {
+        let inputs = parse(r#"{"command":"build","build_target":"workspace","examples":"all"}"#);
+        assert!(matches!(
+            inputs.examples,
+            Some(TargetSpecifier::All(AllTag::All))
+        ));
+    }
+
+    #[test]
+    fn target_names_from_array() {
+        let inputs = parse(
+            r#"{"command":"test","build_target":"workspace","tests":["integration","smoke"]}"#,
+        );
+        match inputs.tests {
+            Some(TargetSpecifier::Names(names)) => {
+                assert_eq!(names, vec!["integration", "smoke"]);
+            }
+            _ => panic!("expected Names variant"),
+        }
+    }
+
+    #[test]
+    fn target_all_tag_is_lowercase() {
+        assert!(
+            serde_json::from_str::<CargoInputs>(
+                r#"{"command":"build","build_target":"workspace","bins":"ALL"}"#
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn all_targets_and_lib_default_to_false() {
+        let inputs = parse(r#"{"command":"build","build_target":"workspace"}"#);
+        assert!(!inputs.all_targets);
+        assert!(!inputs.lib);
+    }
+
+    #[test]
+    fn all_targets_and_lib_parsed() {
+        let inputs = parse(
+            r#"{"command":"build","build_target":"workspace","all_targets":true,"lib":true}"#,
+        );
+        assert!(inputs.all_targets);
+        assert!(inputs.lib);
+    }
+
+    #[test]
+    fn render_command_joins_program_and_args() {
+        let mut cmd = process::Command::new("cargo");
+        cmd.arg("build")
+            .arg("--workspace")
+            .arg("--example")
+            .arg("foo");
+        assert_eq!(
+            render_command(&cmd),
+            "cargo build --workspace --example foo"
+        );
     }
 }
